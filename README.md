@@ -2,9 +2,12 @@
 
 Your links and app "combos" on every computer, with your phone as the remote.
 
+![Tap a combo on the phone and its apps open on the computer; then pause music and mute the mic from the Media tab](docs/demo.gif)
+
 - **Links**: save bookmarks once and they show up on all your paired devices.
 - **Combos**: a named group of apps, links and terminal commands that open together, and close together. "Work" can be Slack + VS Code + a Jira tab + `npm run dev`.
 - **Phone remote**: open or close combos on your computer, open a link there, or bring an open app to the front, from your Android phone.
+- **Media**: see what's playing on the computer, then play, pause, skip, change the volume or mute the microphone from your phone.
 - **Quick access**: a small widget from the tray icon, a floating pill on the screen edge, or a keyboard shortcut. Ctrl+Alt+1–9 (⌥⌘1–9 on a Mac) opens combo 1–9.
 
 Devices talk to each other directly and end-to-end encrypted. There's no account and no server that stores your data.
