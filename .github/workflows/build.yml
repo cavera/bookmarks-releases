@@ -1,0 +1,117 @@
+# Builds Bookmarks from the private cavera/bookmarks-app at a tag and publishes the release here,
+# with the updater's latest.json. Installed apps update themselves from this repo.
+#
+# It lives in this public repo because public repos get free Actions minutes (Mac runners cost
+# 10× on private ones). Only the build logs are public; the source is checked out onto the
+# runner and never published.
+#
+# Started by bookmarks-app's release.yml when a tag like v0.2.0 is pushed there, or by hand:
+# Actions → Build → Run workflow, with the tag. Never on pull requests, so forks never see secrets.
+#
+# Secrets (this repo → Settings → Secrets and variables → Actions):
+#   APP_REPO_TOKEN                      fine-grained token, Contents: read-only on bookmarks-app
+#   TAURI_SIGNING_PRIVATE_KEY           contents of the updater key file
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#   ANDROID_KEYSTORE                    base64 of the keystore the phone's app is signed with
+name: Build
+
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag in bookmarks-app to build, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: write # publish the release in this repo
+
+env:
+  TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tag looks like a version
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a version tag: $TAG"; exit 1; }'
+
+  desktop:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest] # ponytail: Apple-silicon Mac only
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cavera/bookmarks-app
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.APP_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install --frozen-lockfile
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          owner: cavera
+          repo: bookmarks-releases
+          tagName: ${{ env.TAG }}
+          releaseCommitish: main
+          releaseName: Bookmarks ${{ env.TAG }}
+          releaseDraft: false
+          tauriScript: bun tauri
+          # Signed update bundles only here, so a local `tauri build` needs no key.
+          args: --config src-tauri/tauri.release.conf.json
+
+  android:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cavera/bookmarks-app
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.APP_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install --frozen-lockfile
+      - name: Build
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" bun tauri android build --apk --target aarch64
+      - name: Sign
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          echo "$ANDROID_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          signer=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          # Android's standard debug-keystore password and alias.
+          "$signer" sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass pass:android --ks-key-alias androiddebugkey \
+            --out "Bookmarks_${TAG#v}_android-arm64.apk" \
+            src-tauri/gen/android/app/build/outputs/apk/*/release/*-release-unsigned.apk # "universal" even with one target
+          rm "$RUNNER_TEMP/release.keystore"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The desktop job creates the release; wait for it if it's still building.
+          for i in $(seq 1 60); do gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break; sleep 30; done
+          gh release upload "$TAG" Bookmarks_*_android-arm64.apk -R "$GITHUB_REPOSITORY" --clobber
